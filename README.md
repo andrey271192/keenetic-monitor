@@ -38,7 +38,13 @@ Keenetic Monitor — это система мониторинга роутеро
 
 ⚡ УСТАНОВКА (1 КОМАНДА)
 apt install -y snmp snmp-mibs-downloader
-bash <(curl -s https://raw.githubusercontent.com/YOUR_USERNAME/keenetic-monitor/main/install.sh)
+curl -sL https://raw.githubusercontent.com/andrey271192/keenetic-monitor/main/install.sh | bash
+
+📜 Управление
+systemctl restart keenetic
+systemctl status keenetic
+journalctl -u keenetic -f
+
 
 🧠 В ПРОЦЕССЕ УСТАНОВКИ
 

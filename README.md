@@ -136,6 +136,8 @@ keenetic-monitor/
 └── install.sh
 
 
+⚡  УДАЛИТЬ
 
+curl -sL https://raw.githubusercontent.com/andrey271192/keenetic-monitor/main/uninstall.sh | bash
 
 

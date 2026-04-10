@@ -1,0 +1,4 @@
+config.py
+mapping.json
+__pycache__/
+*.pyc

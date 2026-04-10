@@ -12,7 +12,7 @@ mkdir -p $APP_DIR
 cd $APP_DIR
 
 echo "📦 Клонируем репозиторий..."
-git clone https://github.com/YOUR_USERNAME/keenetic-monitor.git .
+git clone https://github.com/andrey271192/keenetic-monitor.git .
 
 echo "📦 Установка зависимостей..."
 pip3 install -r requirements.txt

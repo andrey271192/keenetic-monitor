@@ -1,0 +1,12 @@
+[Unit]
+Description=Keenetic Monitor
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/opt/keenetic-monitor
+ExecStart=/opt/keenetic-monitor/venv/bin/python main.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

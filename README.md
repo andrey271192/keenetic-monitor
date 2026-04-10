@@ -37,7 +37,9 @@ Keenetic Monitor — это система мониторинга роутеро
 	•	Открытый порт: 8000
 
 ⚡ УСТАНОВКА (1 КОМАНДА)
+
 apt install -y snmp snmp-mibs-downloader
+
 curl -sL https://raw.githubusercontent.com/andrey271192/keenetic-monitor/main/install.sh | bash
 
 📜 Управление

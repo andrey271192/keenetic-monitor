@@ -42,6 +42,7 @@ apt install -y snmp snmp-mibs-downloader
 
 curl -sL https://raw.githubusercontent.com/andrey271192/keenetic-monitor/main/install.sh | bash
 
+
 📜 Управление
 
 systemctl restart keenetic

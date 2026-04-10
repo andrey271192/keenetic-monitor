@@ -1,4 +1,11 @@
-ROUTERS = []
+ROUTERS = [
+    {
+        "name": "router1",
+        "url": "http://192.168.1.1",
+        "user": "admin",
+        "pass": "password"
+    }
+]
 
 CHECK_INTERVAL = 60
 

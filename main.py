@@ -37,10 +37,10 @@ except:
 # ========= DEFAULT MAPPING =========
 DEFAULT_MAPPING = {}
 
-if os.path.exists(MAPPING_FILE):
+try:
     with open(MAPPING_FILE, "r") as f:
         NAME_MAPPING = json.load(f)
-else:
+except:
     NAME_MAPPING = DEFAULT_MAPPING.copy()
 
 # ========= AUTH =========

@@ -1,127 +1,247 @@
-#!/bin/bash
+import asyncio
+import json
+import os
+import sys
+from fastapi import FastAPI, Form, Request, HTTPException, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse
+import uvicorn
+from contextlib import asynccontextmanager
+from keenetic_api import KeeneticClient
+import logging
+import httpx
+import re
+import importlib
+import secrets
+from urllib.parse import urlparse
+from datetime import datetime, timedelta
 
-set -e
-
-echo "🚀 Keenetic Monitor Installer"
-
-APP_DIR="/opt/keenetic-monitor"
-
-# ========= INSTALL =========
-echo "📦 Установка зависимостей..."
-apt update -y
-apt install -y python3 python3-pip python3-venv git snmp curl
-
-# ========= CLONE / UPDATE =========
-if [ -d "$APP_DIR/.git" ]; then
-    echo "⚠️ Найден установленный проект, обновляем..."
-    cd $APP_DIR
-    git pull
-else
-    echo "📦 Клонируем репозиторий..."
-    rm -rf $APP_DIR
-    mkdir -p $APP_DIR
-    cd $APP_DIR
-    git clone https://github.com/andrey271192/keenetic-monitor.git .
-fi
-
-# ========= VENV =========
-echo "🐍 Создаём виртуальное окружение..."
-cd $APP_DIR
-python3 -m venv venv
-source venv/bin/activate
-
-echo "📦 Установка Python зависимостей..."
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# ========= INPUT =========
-echo ""
-echo "🔧 Настройка..."
-
-read -p "Telegram TOKEN (можно пусто): " TG_TOKEN
-read -p "Telegram CHAT_ID (можно пусто): " TG_CHAT
-
-read -p "SMTP HOST (Enter = пропустить): " SMTP_HOST
-read -p "SMTP USER: " SMTP_USER
-read -p "SMTP PASS: " SMTP_PASS
-read -p "SMTP TO: " SMTP_TO
-
-read -p "Speed monitor URL (Enter = пропустить): " SPEED_URL
-
-# ========= ROUTERS =========
-echo ""
-echo "📡 Добавление роутеров (можно много)"
-
-ROUTERS="["
-
-while true; do
-    read -p "Добавить роутер? (y/n): " yn
-    [ "$yn" != "y" ] && break
-
-    read -p "Название: " NAME
-    read -p "URL: " URL
-    read -p "Логин [admin]: " USER
-    USER=${USER:-admin}
-    read -p "Пароль: " PASS
-
-    ROUTERS="$ROUTERS
-    {\"name\": \"$NAME\", \"url\": \"$URL\", \"user\": \"$USER\", \"pass\": \"$PASS\"},"
-done
-
-ROUTERS="${ROUTERS%,}"
-ROUTERS="$ROUTERS]"
+# ========= BASE =========
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.py")
+MAPPING_FILE = os.path.join(BASE_DIR, "mapping.json")
 
 # ========= CONFIG =========
-echo "⚙️ Создаём config.py..."
+sys.path.insert(0, BASE_DIR)
+try:
+    import config
+except:
+    config = None
 
-cat > $APP_DIR/config.py <<EOF
-ROUTERS = $ROUTERS
+ROUTERS = getattr(config, "ROUTERS", [])
+CHECK_INTERVAL = getattr(config, "CHECK_INTERVAL", 60)
+STATUS_FILE = getattr(config, "STATUS_FILE", os.path.join(BASE_DIR, "status.json"))
 
-CHECK_INTERVAL = 300
+# ========= MAPPING =========
+try:
+    with open(MAPPING_FILE, "r") as f:
+        NAME_MAPPING = json.load(f)
+except:
+    NAME_MAPPING = {}
 
-TELEGRAM_TOKEN = "$TG_TOKEN"
-TELEGRAM_CHAT_ID = "$TG_CHAT"
+# ========= AUTH =========
+ADMIN_USER = "admin"
+ADMIN_PASSWORD = "admin"
+sessions = {}
 
-SMTP_HOST = "$SMTP_HOST"
-SMTP_PORT = 465
-SMTP_USER = "$SMTP_USER"
-SMTP_PASS = "$SMTP_PASS"
-SMTP_FROM = "$SMTP_USER"
-SMTP_TO = "$SMTP_TO"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-STATUS_FILE = "$APP_DIR/status.json"
+# ========= CORE =========
+def reload_config():
+    global ROUTERS
+    try:
+        if config:
+            importlib.reload(config)
+            ROUTERS = config.ROUTERS
+    except Exception as e:
+        logger.error(e)
 
-SPEED_MONITOR_URL = "$SPEED_URL"
-SPEED_UPDATE_INTERVAL = 60
-EOF
+def get_current_user(request: Request):
+    token = request.cookies.get("session")
+    return sessions.get(token)
 
-# ========= SERVICE =========
-echo "⚙️ Настройка systemd..."
+def require_auth(request: Request):
+    if not get_current_user(request):
+        raise HTTPException(status_code=303, headers={"Location": "/login"})
 
-cat > /etc/systemd/system/keenetic.service <<EOF
-[Unit]
-Description=Keenetic Monitor
-After=network.target
+async def check_router(router):
+    client = KeeneticClient(router['url'], router['user'], router['pass'])
+    try:
+        ok = await client.check_connection()
+        return {"name": router['name'], "online": ok, "url": router['url']}
+    finally:
+        await client.close()
 
-[Service]
-WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/venv/bin/python $APP_DIR/main.py
-Restart=always
-User=root
+async def worker():
+    while True:
+        try:
+            results = await asyncio.gather(*(check_router(r) for r in ROUTERS))
+            os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
+            with open(STATUS_FILE, "w") as f:
+                json.dump(results, f, indent=2)
+        except Exception as e:
+            logger.error(e)
 
-[Install]
-WantedBy=multi-user.target
-EOF
+        await asyncio.sleep(CHECK_INTERVAL)
 
-# ========= START =========
-systemctl daemon-reexec
-systemctl daemon-reload
-systemctl enable keenetic
-systemctl restart keenetic
+# ========= APP =========
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(worker())
+    yield
 
-# ========= DONE =========
-IP=$(curl -s ifconfig.me || echo "SERVER_IP")
+app = FastAPI(lifespan=lifespan)
 
-echo ""
-echo "✅ Установка завершена!"
-echo "🌐 Открой: http://$IP:8001"
+# ========= LOGIN =========
+@app.get("/login", response_class=HTMLResponse)
+async def login_form():
+    return """
+    <html><body style="background:#0a0c10;color:white;font-family:sans-serif">
+    <h2>Вход</h2>
+    <form method="post">
+    <input name="username"><br><br>
+    <input name="password" type="password"><br><br>
+    <button>Войти</button>
+    </form>
+    </body></html>
+    """
+
+@app.post("/login")
+async def login(username: str = Form(...), password: str = Form(...)):
+    if username == ADMIN_USER and password == ADMIN_PASSWORD:
+        token = secrets.token_urlsafe(32)
+        sessions[token] = username
+        r = RedirectResponse("/", 303)
+        r.set_cookie("session", token)
+        return r
+    return HTMLResponse("error", 401)
+
+@app.get("/logout")
+async def logout():
+    r = RedirectResponse("/")
+    r.delete_cookie("session")
+    return r
+
+# ========= DASHBOARD =========
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    data = []
+    if os.path.exists(STATUS_FILE):
+        try:
+            with open(STATUS_FILE) as f:
+                data = json.load(f)
+        except:
+            pass
+
+    is_auth = get_current_user(request) is not None
+
+    html = f"""
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <title>Keenetic Monitor</title>
+    <style>
+    body {{background:#0a0c10;color:white;font-family:sans-serif;padding:20px}}
+    .card {{background:#161b22;padding:15px;margin-bottom:10px;border-radius:8px}}
+    .online {{color:#2ecc71}}
+    .offline {{color:#e74c3c}}
+    </style>
+    </head>
+    <body>
+
+    <h1>📡 Keenetic Monitor</h1>
+    <div>Всего: {len(data)} | Онлайн: {sum(1 for r in data if r.get('online'))}</div>
+    """
+
+    if is_auth:
+        html += """
+        <h2>➕ Добавить</h2>
+        <form method="post" action="/add">
+        <input name="name" placeholder="name"><br>
+        <input name="url" placeholder="url"><br>
+        <input name="user" value="admin"><br>
+        <input name="passwd" placeholder="password"><br>
+        <button>Добавить</button>
+        </form>
+
+        <h2>➖ Удалить</h2>
+        <form method="post" action="/delete">
+        <input name="name" placeholder="name">
+        <button>Удалить</button>
+        </form>
+
+        <a href="/logout">Выйти</a>
+        """
+    else:
+        html += '<a href="/login">Войти</a>'
+
+    for r in data:
+        name = NAME_MAPPING.get(r.get("name"), r.get("name"))
+        status = r.get("online", False)
+        cls = "online" if status else "offline"
+
+        html += f"""
+        <div class="card">
+        <b>{name}</b><br>
+        <span class="{cls}">{'ONLINE' if status else 'OFFLINE'}</span><br>
+        <a href="{r.get('url')}" target="_blank">Открыть</a>
+        </div>
+        """
+
+    html += "</body></html>"
+    return HTMLResponse(content=html)
+
+# ========= ADD =========
+@app.post("/add")
+async def add_router(name: str = Form(...), url: str = Form(...), user: str = Form(...), passwd: str = Form(...), _=Depends(require_auth)):
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            content = f.read()
+
+        new_router = f'    {{"name": "{name}", "url": "{url}", "user": "{user}", "pass": "{passwd}"}}'
+
+        match = re.search(r'(ROUTERS\s*=\s*\[)(.*?)(\])', content, re.DOTALL)
+
+        if match:
+            start, middle, end = match.groups()
+
+            if middle.strip():
+                new_content = content.replace(match.group(0), f'{start}{middle.rstrip()},\n{new_router}{end}')
+            else:
+                new_content = content.replace(match.group(0), f'{start}\n{new_router}\n{end}')
+
+            with open(CONFIG_PATH, "w") as f:
+                f.write(new_content)
+
+            reload_config()
+
+    except Exception as e:
+        logger.error(e)
+
+    return RedirectResponse("/", 303)
+
+# ========= DELETE =========
+@app.post("/delete")
+async def delete_router(name: str = Form(...), _=Depends(require_auth)):
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            lines = f.readlines()
+
+        new_lines = []
+        for line in lines:
+            if f'"{name}"' not in line:
+                new_lines.append(line)
+
+        with open(CONFIG_PATH, "w") as f:
+            f.writelines(new_lines)
+
+        reload_config()
+
+    except Exception as e:
+        logger.error(e)
+
+    return RedirectResponse("/", 303)
+
+# ========= RUN =========
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8001)

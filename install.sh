@@ -124,4 +124,4 @@ IP=$(curl -s ifconfig.me || echo "SERVER_IP")
 
 echo ""
 echo "✅ Установка завершена!"
-echo "🌐 Открой: http://$IP:8000"
+echo "🌐 Открой: http://$IP:8001"

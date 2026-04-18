@@ -376,7 +376,7 @@ def _router_card(router: Dict, sites: Optional[Dict], speed_history: List[Dict])
     <div class="divider"></div>
     <div class="card-meta">
       <span>{sites_meta} {sites_ip}</span>
-      <a href="{url}" target="_blank">Открыть →</a>
+      <span>{"<a href=\'http://89.124.112.9:5000/stats/" + name + "\' target=\'_blank\'>📊 График</a> · " if speed_history else ""}<a href="{url}" target="_blank">Открыть →</a></span>
     </div>
   </div>
 </div>"""

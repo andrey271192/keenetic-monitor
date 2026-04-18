@@ -1,7 +1,4 @@
-"""
-notifier.py — уведомления Telegram + Email.
-Отслеживает состояние каждого сайта на каждом роутере отдельно.
-"""
+import asyncio
 import logging
 import os
 import smtplib
@@ -13,7 +10,6 @@ import httpx
 
 logger = logging.getLogger("notifier")
 
-# {router_name: {"youtube": bool|None, "netflix": bool|None, "telegram": bool|None}}
 _prev_states: Dict[str, Dict[str, Optional[bool]]] = {}
 
 
@@ -38,21 +34,22 @@ async def send_telegram(message: str) -> bool:
         return False
 
 
-def send_email(subject: str, body: str) -> bool:
+def _send_email_sync(subject: str, body: str) -> bool:
     host     = _e("SMTP_HOST", "smtp.gmail.com")
-    port     = int(_e("SMTP_PORT", "587"))
+    port_str = _e("SMTP_PORT", "587")
     user     = _e("SMTP_USER")
     password = _e("SMTP_PASS")
     to       = _e("SMTP_TO")
-    if not all([user, password, to]):
+    if not all([user, password, to, host]):
         return False
     try:
+        port = int(port_str)
         msg = MIMEMultipart()
         msg["From"] = user
         msg["To"] = to
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain", "utf-8"))
-        with smtplib.SMTP(host, port) as s:
+        with smtplib.SMTP(host, port, timeout=15) as s:
             s.starttls()
             s.login(user, password)
             s.sendmail(user, to, msg.as_string())
@@ -62,10 +59,26 @@ def send_email(subject: str, body: str) -> bool:
         return False
 
 
+async def send_email(subject: str, body: str) -> bool:
+    """Отправка email асинхронно с таймаутом 20 сек."""
+    try:
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _send_email_sync, subject, body),
+            timeout=20
+        )
+        return result
+    except asyncio.TimeoutError:
+        logger.error("Email timeout after 20 sec")
+        return False
+    except Exception as e:
+        logger.error(f"Email async error: {e}")
+        return False
+
+
 async def notify(subject: str, body: str):
-    """Отправляет и в Telegram и на Email."""
     await send_telegram(f"🔔 <b>{subject}</b>\n{body}")
-    send_email(f"[Keenetic Monitor] {subject}", body)
+    await send_email(f"[Keenetic Monitor] {subject}", body)
 
 
 async def check_and_notify(
@@ -73,10 +86,6 @@ async def check_and_notify(
     display_name: str,
     sites_data: dict
 ) -> bool:
-    """
-    Проверяет изменение статуса сайтов и шлёт уведомления.
-    Возвращает True если хотя бы один сайт недоступен (нужен restart).
-    """
     if router_name not in _prev_states:
         _prev_states[router_name] = {
             "youtube": None, "netflix": None, "telegram": None
@@ -94,18 +103,13 @@ async def check_and_notify(
     for key, current_ok, site_name, icon in checks:
         if current_ok is None:
             continue
-
         if not current_ok:
             any_fail = True
-
         prev_ok = prev.get(key)
-
         if prev_ok is None:
             prev[key] = current_ok
             continue
-
         t = sites_data.get("time", "")
-
         if prev_ok and not current_ok:
             await notify(
                 f"❌ {site_name} недоступен — {display_name}",
@@ -115,7 +119,6 @@ async def check_and_notify(
                 f"→ Перезапускаю neo автоматически..."
             )
             prev[key] = False
-
         elif not prev_ok and current_ok:
             ms = sites_data.get(f"{key}_ms", 0)
             await notify(

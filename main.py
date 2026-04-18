@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+import subprocess
 from keenetic_api import KeeneticClient
 from notifier import check_and_notify, notify
 
@@ -277,7 +278,7 @@ body { background: #0d1117; color: #e6edf3; font-family: -apple-system, BlinkMac
 def _base(content: str, is_auth: bool = False, title: str = "Keenetic Monitor") -> str:
     nav = '<a href="/login">🔑 Войти</a>'
     if is_auth:
-        nav = '<a href="/admin">⚙️ Управление</a><a href="/mapping">✏️ Имена</a><a href="/logout">Выйти</a>'
+        nav = '<a href="/admin">⚙️ Управление</a><a href="/mapping">✏️ Имена</a><a href="/test">🧪 Тест</a><a href="/logout">Выйти</a>'
     return f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -319,7 +320,7 @@ def _site_badge(ok: Optional[bool], name: str, ms: float = 0) -> str:
     return f'<div class="sb fail">✗ {name}</div>'
 
 
-def _router_card(router: Dict, sites: Optional[Dict], speed_history: List[Dict]) -> str:
+def _router_card(router: Dict, sites: Optional[Dict], speed_history: List[Dict], is_auth: bool = False) -> str:
     name    = router.get("name", "")
     display = name_mapping.get(name)
     online  = router.get("online", False)
@@ -376,7 +377,8 @@ def _router_card(router: Dict, sites: Optional[Dict], speed_history: List[Dict])
     <div class="divider"></div>
     <div class="card-meta">
       <span>{sites_meta} {sites_ip}</span>
-      <span>{"<a href=\'http://89.124.112.9:5000/stats/" + name + "\' target=\'_blank\'>📊 График</a> · " if speed_history else ""}<a href="{url}" target="_blank">Открыть →</a></span>
+      <span>{"<a href=\'http://89.124.112.9:5000/stats/" + name + "\' target=\'_blank\'>📊 График</a>" if speed_history else ""}</span>
+      {"<a href=\"" + url + "\" target=\"_blank\">Открыть →</a>" if is_auth else ""}
     </div>
   </div>
 </div>"""
@@ -451,7 +453,8 @@ async def dashboard(request: Request):
         cards += _router_card(
             r,
             sites_all.get(rname),
-            speed_all.get(rname, [])
+            speed_all.get(rname, []),
+            is_auth=is_auth
         )
 
     return HTMLResponse(_base(pills + f'<div class="grid">{cards}</div>', is_auth=is_auth))
@@ -563,6 +566,106 @@ async def delete_router(request: Request, name: str = Form(...)):
     name_mapping.save()
     importlib.reload(_cfg)
     return RedirectResponse("/admin", status_code=303)
+
+
+@app.get("/test", response_class=HTMLResponse)
+async def test_page(request: Request):
+    if not get_current_user(request):
+        return RedirectResponse("/login", status_code=303)
+
+    importlib.reload(_cfg)
+    routers = _cfg.ROUTERS
+
+    router_opts = "".join(
+        f'<option value="{r["name"]}">{name_mapping.get(r["name"])}</option>'
+        for r in routers
+    )
+
+    content = f"""
+<div style="margin-bottom:16px"><a href="/" style="color:#58a6ff;font-size:13px">← На главную</a></div>
+<div class="admin-card">
+  <h3>🔔 Тест уведомлений</h3>
+  <form method="post" action="/test/notify">
+    <div class="form-row">
+      <input name="subject" placeholder="Тема" value="TEST" style="min-width:120px">
+      <input name="body" placeholder="Текст сообщения" value="Тестовое уведомление" style="min-width:260px">
+      <button class="btn" type="submit">Отправить</button>
+    </div>
+    <div style="font-size:12px;color:#8b949e;margin-top:8px">Отправит в Telegram и на Email</div>
+  </form>
+</div>
+<div class="admin-card">
+  <h3>🔌 Тест SSH перезапуска neo</h3>
+  <form method="post" action="/test/ssh">
+    <div class="form-row">
+      <select name="router_name" style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:7px 12px;color:#e6edf3;font-size:13px">
+        {router_opts}
+      </select>
+      <button class="btn" type="submit">Перезапустить neo</button>
+    </div>
+    <div style="font-size:12px;color:#8b949e;margin-top:8px">Выполнит SSH команду на роутере и покажет результат</div>
+  </form>
+</div>"""
+    return HTMLResponse(_base(content, is_auth=True, title="Тест"))
+
+
+@app.post("/test/notify")
+async def test_notify(request: Request, subject: str = Form(...), body: str = Form(...)):
+    if not get_current_user(request):
+        return RedirectResponse("/login", status_code=303)
+    await notify(subject, body)
+    importlib.reload(_cfg)
+    routers = _cfg.ROUTERS
+    router_opts = "".join(
+        f'<option value="{r["name"]}">{name_mapping.get(r["name"])}</option>'
+        for r in routers
+    )
+    content = f"""
+<div style="margin-bottom:16px"><a href="/" style="color:#58a6ff;font-size:13px">← На главную</a></div>
+<div class="admin-card">
+  <h3>✅ Уведомление отправлено!</h3>
+  <div style="font-size:13px;color:#8b949e;margin-top:8px">Тема: <b style="color:#e6edf3">{subject}</b> · Текст: {body}</div>
+  <div style="margin-top:12px"><a href="/test" style="color:#58a6ff">← Назад к тестам</a></div>
+</div>"""
+    return HTMLResponse(_base(content, is_auth=True, title="Тест"))
+
+
+@app.post("/test/ssh")
+async def test_ssh(request: Request, router_name: str = Form(...)):
+    if not get_current_user(request):
+        return RedirectResponse("/login", status_code=303)
+
+    importlib.reload(_cfg)
+    router = next((r for r in _cfg.ROUTERS if r["name"] == router_name), None)
+    result = "Роутер не найден в конфиге"
+    success = False
+
+    if router:
+        # Читаем SSH настройки из sites_data если есть
+        ssh_host = router.get("url", "").replace("https://", "").replace("http://", "").split(":")[0].split("/")[0]
+        ssh_user = router.get("ssh_user", "root")
+        ssh_pass = router.get("ssh_pass", "keenetic")
+        try:
+            cmd = f"/opt/bin/send.sh 'SSH TEST' 'Тест SSH с сервера на {router_name}'"
+            proc = subprocess.run(
+                ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+                 f"{ssh_user}@{ssh_host}", "/opt/etc/init.d/S99hrneo restart"],
+                capture_output=True, text=True, timeout=30
+            )
+            result = proc.stdout + proc.stderr or "Команда выполнена без вывода"
+            success = proc.returncode == 0
+        except Exception as e:
+            result = str(e)
+
+    status = "✅ Успешно" if success else "⚠️ Результат"
+    content = f"""
+<div style="margin-bottom:16px"><a href="/" style="color:#58a6ff;font-size:13px">← На главную</a></div>
+<div class="admin-card">
+  <h3>{status} — SSH на {router_name}</h3>
+  <pre style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:12px;font-size:12px;color:#3fb950;margin-top:12px;overflow-x:auto">{result}</pre>
+  <div style="margin-top:12px"><a href="/test" style="color:#58a6ff">← Назад к тестам</a></div>
+</div>"""
+    return HTMLResponse(_base(content, is_auth=True, title="Тест SSH"))
 
 
 @app.get("/api/status")

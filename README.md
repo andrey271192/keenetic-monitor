@@ -50,6 +50,10 @@
 ## ⚡ Установка сервера (1 команда)
 
 ```bash
+apt-get install -y python3 python3-pip python3-venv python3.12-venv git curl
+```
+
+```bash
 curl -sL https://raw.githubusercontent.com/andrey271192/keenetic-monitor/main/install.sh | bash
 ```
 

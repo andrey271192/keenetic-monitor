@@ -3,25 +3,29 @@
 #   Keenetic Monitor v4.0
 #
 #   НАСТРОЙКА:
-#   1. Укажи SERVER, ROUTER_NAME, ROUTER_SSH_HOST, ROUTER_SSH_USER
-#   2. Добавь в Task Scheduler: каждые 15 минут
+#   1. Укажи SERVER, ROUTER_NAME, ROUTER_SSH_HOST, ROUTER_SSH_PASS
+#   2. Положи plink.exe в ту же папку (скачать: putty.org)
+#   3. Task Scheduler: каждые 15 минут
 # =============================================================
 
 # ===== НАСТРОЙКИ (меняй для каждого объекта) =====
 $SERVER          = "http://YOUR_SERVER_IP:5000"
 $ROUTER_NAME     = "home"           # имя как в мониторе
-$ROUTER_SSH_HOST = "192.168.88.1"   # IP роутера в локальной сети
-$ROUTER_SSH_USER = "root"           # SSH логин роутера (обычно root)
-$ROUTER_SSH_KEY  = "$env:USERPROFILE\.ssh\id_rsa"  # путь к SSH ключу
+$ROUTER_SSH_HOST = "192.168.1.1"   # IP роутера в локальной сети
+$ROUTER_SSH_USER = "root"           # SSH логин
+$ROUTER_SSH_PASS = "keenetic"       # SSH пароль
 # =================================================
 
+$SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PC_NAME = $env:COMPUTERNAME
-Set-Location (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$log = "check_sites.log"
+$log = "$SCRIPT_DIR\check_sites.log"
+$plink = "$SCRIPT_DIR\plink.exe"
 
 function Write-Log($msg) {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "[$ts] $msg" | Tee-Object -FilePath $log -Append | Write-Host
+    $line = "[$ts] $msg"
+    Add-Content -Path $log -Value $line
+    Write-Host $line
 }
 
 Write-Log "[$ROUTER_NAME] Starting site check..."
@@ -73,44 +77,46 @@ try {
     Write-Log "Failed to send to server: $_"
 }
 
-# ===== ПЕРЕЗАПУСК NEO ЧЕРЕЗ SSH =====
+# ===== ПЕРЕЗАПУСК NEO ЧЕРЕЗ PLINK (SSH с паролем) =====
 if ($restart_neo) {
     Write-Log "Restarting neo via SSH on $ROUTER_SSH_HOST..."
-    try {
-        # Перезапускаем neo
-        $ssh_cmd = "ssh -i `"$ROUTER_SSH_KEY`" -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${ROUTER_SSH_USER}@${ROUTER_SSH_HOST} '/opt/etc/init.d/S99hrneo restart'"
-        $output = cmd /c $ssh_cmd 2>&1
-        Write-Log "SSH result: $output"
 
-        # Ждём 2 минуты пока neo поднимается
-        Write-Log "Waiting 120 sec for neo to start..."
-        Start-Sleep -Seconds 120
+    if (-not (Test-Path $plink)) {
+        Write-Log "ERROR: plink.exe не найден в $SCRIPT_DIR"
+        Write-Log "Скачай plink.exe с putty.org и положи в папку со скриптом"
+    } else {
+        try {
+            $cmd = "echo y | `"$plink`" -ssh -batch -pw `"$ROUTER_SSH_PASS`" ${ROUTER_SSH_USER}@${ROUTER_SSH_HOST} `"/opt/etc/init.d/S99hrneo restart`""
+            $output = cmd /c $cmd 2>&1
+            Write-Log "SSH result: $output"
 
-        # Повторная проверка сайтов
-        Write-Log "Re-checking sites after restart..."
-        $yt2  = Check-Site "https://www.youtube.com"  "YouTube"
-        $nf2  = Check-Site "https://www.netflix.com"  "Netflix"
-        $tg2  = Check-Site "https://web.telegram.org" "Telegram"
+            Write-Log "Waiting 120 sec for neo to start..."
+            Start-Sleep -Seconds 120
 
-        # Отправляем результат повторной проверки
-        $body2 = @{
-            router_name  = $ROUTER_NAME
-            ip           = $ip
-            time         = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-            youtube_ok   = $yt2.ok
-            youtube_ms   = $yt2.ms
-            netflix_ok   = $nf2.ok
-            netflix_ms   = $nf2.ms
-            telegram_ok  = $tg2.ok
-            telegram_ms  = $tg2.ms
-        } | ConvertTo-Json -Depth 3
+            Write-Log "Re-checking sites after restart..."
+            $yt2  = Check-Site "https://www.youtube.com"  "YouTube"
+            $nf2  = Check-Site "https://www.netflix.com"  "Netflix"
+            $tg2  = Check-Site "https://web.telegram.org" "Telegram"
 
-        Invoke-RestMethod -Uri "$SERVER/push_sites" -Method Post `
-            -Body $body2 -ContentType "application/json" -TimeoutSec 15 | Out-Null
-        Write-Log "Post-restart check sent"
+            $body2 = @{
+                router_name  = $ROUTER_NAME
+                ip           = $ip
+                time         = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+                youtube_ok   = $yt2.ok
+                youtube_ms   = $yt2.ms
+                netflix_ok   = $nf2.ok
+                netflix_ms   = $nf2.ms
+                telegram_ok  = $tg2.ok
+                telegram_ms  = $tg2.ms
+            } | ConvertTo-Json -Depth 3
 
-    } catch {
-        Write-Log "SSH restart failed: $_"
+            Invoke-RestMethod -Uri "$SERVER/push_sites" -Method Post `
+                -Body $body2 -ContentType "application/json" -TimeoutSec 15 | Out-Null
+            Write-Log "Post-restart check sent"
+
+        } catch {
+            Write-Log "SSH restart failed: $_"
+        }
     }
 }
 
